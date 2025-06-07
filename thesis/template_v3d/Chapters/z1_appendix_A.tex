@@ -1,0 +1,426 @@
+%!TEX root = ../thesis.tex
+\append{Текст програми}
+\label{appendix:A}
+
+\section{Програма 1}
+
+Програмний код на мовою Python для побудови оптимального плану транспортування на 
+не орієнтованому невід'ємно визначеному графі $G = (V, E, w)$.
+
+\begin{minted}[fontsize=\small]{python}
+import numpy as np
+import collections
+
+# --- Reusable Edge Class ---
+class Edge:
+    def __init__(self, to, capacity, cost, reverse_edge_idx):
+        self.to = to
+        self.capacity = capacity  # Original capacity
+        self.cost = cost          # Original cost per unit of flow
+        self.reverse_edge_idx = reverse_edge_idx # Index in graph[to] of the reverse edge
+        self.flow = 0.0
+
+# --- Edmonds-Karp for Initial Feasible Flow ---
+def _bfs_for_edmonds_karp(graph, s, t, num_vertices, parent_nodes, parent_edges):
+    """
+    Performs BFS to find an augmenting path in the residual graph (capacities only).
+    Fills parent_nodes and parent_edges to reconstruct the path.
+    Returns True if a path is found, False otherwise.
+    """
+    for i in range(num_vertices): # Reset parents
+        parent_nodes[i] = -1
+        parent_edges[i] = None
+    
+    queue = collections.deque()
+    queue.append(s)
+    
+    visited = [False] * num_vertices
+    visited[s] = True
+
+    while queue:
+        u = queue.popleft()
+        if u == t:
+            return True # Path found
+
+        for edge in graph[u]:
+            residual_capacity = edge.capacity - edge.flow
+            if not visited[edge.to] and residual_capacity > 1e-9: # Check for usable capacity
+                visited[edge.to] = True
+                parent_nodes[edge.to] = u
+                parent_edges[edge.to] = edge
+                queue.append(edge.to)
+    return False
+
+def _find_initial_feasible_flow_edmonds_karp(graph, s, t, num_vertices, required_flow):
+    """
+    Finds an initial feasible flow up to required_flow using Edmonds-Karp.
+    Modifies flows on the Edge objects in 'graph'.
+    Returns the total flow achieved.
+    """
+    current_total_flow = 0.0
+    parent_nodes = [-1] * num_vertices
+    parent_edges = [None] * num_vertices # Stores the Edge object leading to a node
+
+    while current_total_flow < required_flow - 1e-9:
+        if not _bfs_for_edmonds_karp(graph, s, t, num_vertices, parent_nodes, parent_edges):
+            break # No more augmenting paths
+
+        path_bottleneck = float('inf')
+        curr = t
+        while curr != s:
+            edge_to_curr = parent_edges[curr]
+            path_bottleneck = min(path_bottleneck, edge_to_curr.capacity - edge_to_curr.flow)
+            curr = parent_nodes[curr]
+        
+        flow_to_send_on_path = min(path_bottleneck, required_flow - current_total_flow)
+        if flow_to_send_on_path < 1e-9:
+            break # Bottleneck is too small or demand nearly met
+
+        v = t
+        while v != s:
+            u = parent_nodes[v]
+            edge_uv = parent_edges[v] # Edge u -> v
+            
+            edge_uv.flow += flow_to_send_on_path
+            # Update flow on reverse edge v -> u
+            graph[v][edge_uv.reverse_edge_idx].flow -= flow_to_send_on_path
+            v = u
+        
+        current_total_flow += flow_to_send_on_path
+        
+    return current_total_flow
+
+# --- Bellman-Ford for Negative Cycle Detection ---
+def _find_negative_cycle_bellman_ford(graph, num_vertices):
+    """
+    Finds a negative cost cycle in the residual graph using Bellman-Ford.
+    The graph contains Edge objects with current flows and original costs.
+    Residual capacities and costs are derived from these.
+    Returns (list_of_cycle_edges, bottleneck_capacity, cycle_cost) or (None, 0, 0).
+    """
+    distance = [0.0] * num_vertices # Initialize distances to 0 to find any neg cycle
+    predecessor_node = [-1] * num_vertices
+    predecessor_edge_obj = [None] * num_vertices # Stores the Edge object from graph
+
+    # Relax edges V-1 times
+    for _ in range(num_vertices - 1):
+        for u_node in range(num_vertices):
+            for edge in graph[u_node]: # edge is an Edge object from u_node to edge.to
+                residual_capacity = edge.capacity - edge.flow
+                if residual_capacity > 1e-9:
+                    # Cost of using this residual edge is edge.cost
+                    if distance[edge.to] > distance[u_node] + edge.cost:
+                        distance[edge.to] = distance[u_node] + edge.cost
+                        predecessor_node[edge.to] = u_node
+                        predecessor_edge_obj[edge.to] = edge
+    
+    # Check for negative cycles (V-th iteration)
+    node_on_cycle_candidate = -1
+    for u_node in range(num_vertices):
+        for edge in graph[u_node]:
+            residual_capacity = edge.capacity - edge.flow
+            if residual_capacity > 1e-9:
+                if distance[edge.to] > distance[u_node] + edge.cost + 1e-9:
+                    # Negative cycle detected (or reachable from one)
+                    # To ensure 'start_node_for_reconstruction' is actually on the cycle:
+                    predecessor_node[edge.to] = u_node # Update for Vth iter relaxation
+                    predecessor_edge_obj[edge.to] = edge
+                    
+                    node_on_cycle_candidate = edge.to 
+                    for _ in range(num_vertices):
+                        if predecessor_node[node_on_cycle_candidate] == -1: 
+                           node_on_cycle_candidate = -1 # Error or no cycle via this path
+                           break 
+                        node_on_cycle_candidate = predecessor_node[node_on_cycle_candidate]
+                    
+                    if node_on_cycle_candidate != -1:
+                        break # Found a starting point for cycle reconstruction
+        if node_on_cycle_candidate != -1:
+            break
+            
+    if node_on_cycle_candidate == -1:
+        return None, 0, 0 # No negative cycle found
+
+    # Reconstruct the cycle starting from node_on_cycle_candidate
+    cycle_edges = []
+    visited_in_reconstruction = [False] * num_vertices
+    curr = node_on_cycle_candidate
+    
+    while not visited_in_reconstruction[curr]:
+        visited_in_reconstruction[curr] = True
+        # The edge used to reach curr is predecessor_edge_obj[curr]
+        # Its source is predecessor_node[curr]
+        if predecessor_edge_obj[curr] is None: return None, 0, 0 # Should not happen here
+        
+        curr = predecessor_node[curr] # Move to the actual start of path that forms cycle.
+        
+    # Now curr is node_on_cycle_candidate and has been visited.
+    # Trace again to collect edges.
+    path_to_form_cycle = []
+    temp_curr = curr # curr is the start of the cycle (node_on_cycle_candidate after N backtracks)
+    
+    cycle_cost = 0.0
+    cycle_bottleneck = float('inf')
+
+    for _ in range(num_vertices + 1): # Max V edges in a simple cycle
+        edge_leading_to_temp_curr = predecessor_edge_obj[temp_curr]
+        if edge_leading_to_temp_curr is None: return None, 0, 0 # Should not happen
+
+        path_to_form_cycle.append(edge_leading_to_temp_curr)
+        cycle_cost += edge_leading_to_temp_curr.cost
+        cycle_bottleneck = min(cycle_bottleneck, 
+                               edge_leading_to_temp_curr.capacity - edge_leading_to_temp_curr.flow)
+        
+        temp_curr = predecessor_node[temp_curr]
+        if temp_curr == curr: # We have completed the cycle
+            break
+    else: # Did not return to start, something is wrong
+        return None, 0, 0
+        
+    path_to_form_cycle.reverse() # To get edges in cycle order
+
+    if cycle_cost < -1e-9 and cycle_bottleneck > 1e-9: # Ensure it's a valid, usable negative cycle
+        return path_to_form_cycle, cycle_bottleneck, cycle_cost
+    else: # Numerically not a useful negative cycle, or error in reconstruction
+        return None, 0, 0
+
+
+# --- Main Cycle Canceling Algorithm Wrapper ---
+def min_cost_cycle_canceling(
+    original_graph_edges,
+    node_supplies,
+    node_demands,
+    num_original_nodes
+):
+    if len(node_supplies) != num_original_nodes:
+        raise ValueError(f"Length of node_supplies must equal num_original_nodes.")
+    if len(node_demands) != num_original_nodes:
+        raise ValueError(f"Length of node_demands must equal num_original_nodes.")
+
+    _supplies_info = []
+    _total_supply = 0.0
+    for i in range(num_original_nodes):
+        if node_supplies[i] < -1e-9: raise ValueError(f"Supply at node {i} cannot be negative.")
+        if node_supplies[i] > 1e-9:
+            _supplies_info.append((i, node_supplies[i]))
+            _total_supply += node_supplies[i]
+
+    _demands_info = []
+    _total_demand = 0.0
+    for i in range(num_original_nodes):
+        if node_demands[i] < -1e-9: raise ValueError(f"Demand at node {i} cannot be negative.")
+        if node_demands[i] > 1e-9:
+            _demands_info.append((i, node_demands[i]))
+            _total_demand += node_demands[i]
+    
+
+    super_source_idx = num_original_nodes
+    super_sink_idx = num_original_nodes + 1
+    num_transformed_nodes = num_original_nodes + 2
+
+    # Build the graph structure for flow algorithms
+    # This graph will be modified by initial flow and cycle canceling
+    _graph = [[] for _ in range(num_transformed_nodes)]
+    # Keep track of original edges to report flow on them
+    _original_edge_references = [] 
+
+    def _add_edge_pair_to_graph(u, v, cap, cost, is_original=False):
+        fwd_edge = Edge(v, cap, cost, len(_graph[v]))
+        bwd_edge = Edge(u, 0, -cost, len(_graph[u])) 
+        _graph[u].append(fwd_edge)
+        _graph[v].append(bwd_edge)
+        if is_original:
+            _original_edge_references.append({'u': u, 'v': v, 'edge_obj': fwd_edge, 
+                                              'original_capacity': cap, 'original_cost': cost})
+
+    for u, v, cap, cost_val in original_graph_edges:
+        if not (0 <= u < num_original_nodes and 0 <= v < num_original_nodes):
+            raise ValueError(f"Edge ({u},{v}) has out-of-bounds nodes for original graph.")
+        _add_edge_pair_to_graph(u, v, cap, cost_val, is_original=True)
+
+    for s_node, s_amount in _supplies_info:
+        _add_edge_pair_to_graph(super_source_idx, s_node, s_amount, 0)
+    for d_node, d_amount in _demands_info:
+        _add_edge_pair_to_graph(d_node, super_sink_idx, d_amount, 0)
+    
+    # 1. Find Initial Feasible Flow
+    initial_flow_achieved = _find_initial_feasible_flow_edmonds_karp(
+        _graph, super_source_idx, super_sink_idx, num_transformed_nodes, _total_supply
+    )
+
+
+    # Calculate initial cost based on the feasible flow
+    current_min_cost = 0.0
+    for item in _original_edge_references: # Only sum costs for original edges
+        current_min_cost += item['edge_obj'].flow * item['original_cost']
+    
+    # 2. Iteratively Cancel Negative Cycles
+    iteration_count = 0
+    max_iterations = num_transformed_nodes * num_transformed_nodes * len(original_graph_edges)
+    
+    while iteration_count < max_iterations : # Add a safety break for complex cases
+        iteration_count += 1
+        cycle_edge_list, bottleneck_delta, cycle_c = \
+        _find_negative_cycle_bellman_ford(_graph, num_transformed_nodes)
+
+        if not cycle_edge_list:
+            break # No more negative cycles, current flow is optimal
+
+        # Augment flow along the cycle
+        for edge_in_cycle in cycle_edge_list:
+            edge_in_cycle.flow += bottleneck_delta
+            _graph[edge_in_cycle.to][edge_in_cycle.reverse_edge_idx].flow -= bottleneck_delta
+        
+        # Update cost: cycle_c is the sum of costs, it's negative
+        current_min_cost += bottleneck_delta * cycle_c
+
+
+    if iteration_count >= max_iterations and cycle_edge_list:
+        print("Warning (CC): Reached max iterations, cycle canceling might be slow or stuck.")
+
+    # Prepare final flow distribution for reporting (on original edges)
+    final_flow_distribution_original = []
+    for item in _original_edge_references:
+        edge = item['edge_obj']
+        if edge.flow > 1e-9:
+            final_flow_distribution_original.append(
+                (item['u'], item['v'], edge.flow, item['original_capacity'], item['original_cost'])
+            )
+            
+    return current_min_cost, initial_flow_achieved, final_flow_distribution_original
+
+def flow_decomposition_to_transportation_plan(f, S, D):
+    """
+    Decomposes a network flow into a Kantorovich transportation plan.
+    Handles transshipment nodes.
+    """
+    # Create a mutable copy of the flow for updates
+    residual_flow = collections.defaultdict(lambda: collections.defaultdict(int))
+    for u in f:
+        for v in f[u]:
+            if f[u][v] > 0:
+                residual_flow[u][v] = f[u][v]
+
+    transportation_plan = []
+    num_nodes = len(S)
+
+    while True:
+        source = -1
+        # Find a node with a net positive outflow in the residual graph
+        for i in range(num_nodes):
+            out_flow = sum(residual_flow[i].values())
+            in_flow = sum(residual_flow[j][i] for j in range(num_nodes))
+            if out_flow > in_flow:
+                source = i
+                break
+
+        if source == -1:
+            break  # No more flow to decompose
+
+        # Find a path from the source to a sink using DFS
+        stack = [(source, [source])]
+        path_found = None
+        
+        # Keep track of visited nodes to avoid cycles in the current path search
+        visited_in_dfs = {source}
+
+        while stack:
+            u, path = stack.pop()
+            
+            # A sink for a path is a node that is a net demander in the overall problem
+            if S[u] - D[u] < 0:
+                path_found = path
+                break
+
+            for v in sorted(list(residual_flow[u].keys())):
+                if residual_flow[u][v] > 0 and v not in visited_in_dfs:
+                    visited_in_dfs.add(v)
+                    stack.append((v, path + [v]))
+        
+        if path_found:
+            path = path_found
+            
+            # Determine bottleneck capacity of the found path
+            bottleneck = float('inf')
+            for i in range(len(path) - 1):
+                u_p, v_p = path[i], path[i+1]
+                bottleneck = min(bottleneck, residual_flow[u_p][v_p])
+
+            transportation_plan.append((path, bottleneck))
+
+            # Update the residual flow by subtracting the bottleneck amount
+            for i in range(len(path) - 1):
+                u, v = path[i], path[i+1]
+                residual_flow[u][v] -= bottleneck
+        else:
+            # If no path is found from any source, we are done
+            break
+            
+    return transportation_plan
+
+
+
+# --- Example Usage ---
+if __name__ == '__main__':
+# --- Test Cycle Canceling Algorithm ---
+    n = 7
+
+    # Supply and demand arrays
+    supplies = np.array([1, 2, 3, 4, 5, 6, 7])
+    demands = supplies[::-1]
+    
+    # Initialize cost matrix
+    costMatrix = np.array([
+        [0,2,1,2,1,2,1],
+        [2,0,2,1,2,1,2],
+        [1,2,0,2,1,2,1],
+        [2,1,2,0,2,1,2],
+        [1,2,1,2,0,2,1],
+        [2,1,2,1,2,0,2],
+        [1,2,1,2,1,2,0],
+    ])
+
+
+    # Initialize and populate edge list
+    edges = []
+    for i in range(n):
+        for j in range(i + 1, n):
+            edges.append(
+                (i, j, float("inf"), costMatrix[i, j])
+            )
+            edges.append(
+                (j, i, float("inf"), costMatrix[i, j])
+            )
+
+    # Retrieve minimal flow
+    cc_cost, cc_flow_moved, cc_flow_details = \
+        min_cost_cycle_canceling(
+            edges,
+            supplies,
+            demands,
+            n
+        )
+    
+    # Cast flow to a proper format
+    flow_dict_of_dicts = collections.defaultdict(lambda: collections.defaultdict(int))
+    for u, v, f, _, __ in cc_flow_details:
+        flow_dict_of_dicts[u][v] = f
+        print((u, v), "->", f)
+
+    # Run the decomposition
+    plan = flow_decomposition_to_transportation_plan(flow_dict_of_dicts, supplies, demands)
+
+    # --- Display the Results ---
+    print("Decomposition of the Feasible Flow:")
+    print("-" * 40)
+    total_decomposed_flow = 0
+    for path, amount in plan:
+        total_decomposed_flow += amount
+        print(f"  Path: {' -> '.join(map(str, path))}, Amount: {amount}")
+    print("-" * 40)
+    print(f"Total flow decomposed: {total_decomposed_flow}")
+
+    # The sum of net supplies should match the total decomposed flow
+    total_net_supply = sum(max(0, s_i - d_i) for s_i, d_i in zip(supplies, demands))
+    print(f"Total net supply to be shipped: {total_net_supply}")
+\end{minted}

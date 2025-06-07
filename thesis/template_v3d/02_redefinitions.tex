@@ -1,0 +1,25 @@
+% !TeX root = thesis.tex
+\def\lip#1{\|#1\|_{\text{Lip}}} % Ліпшецева стала
+
+\def\div#1{\text{div}\left(#1\right)} % Оператор дивіргенції
+
+% Функція для малювання повного графа
+\newcommand{\completegraph}[1]{%
+    \begin{tikzpicture}[scale=3]
+        \def\n{#1}
+        \def\radius{1}
+        % Малюємо вершини по колу
+        \foreach \i in {1,...,\n} {
+            \pgfmathsetmacro\angle{360/\n * (\i - 1)}
+            \node[draw, circle, inner sep=1pt] (v\i) at ({\radius*cos(\angle)}, {\radius*sin(\angle)}) {};
+        }
+        % З'єднуємо усі вершини
+        \foreach \i in {1,...,\n} {
+            \foreach \j in {1,...,\n} {
+                \ifthenelse{\i < \j}{
+                    \draw (v\i) -- (v\j);
+                }{}
+            }
+        }
+    \end{tikzpicture}
+}
